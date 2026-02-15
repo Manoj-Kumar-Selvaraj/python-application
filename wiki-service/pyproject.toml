@@ -3,7 +3,7 @@ name = "nebula-aurora-assignment"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.10,<3.12"
 dependencies = [
     "asyncpg>=0.29.0",    
     "fastapi>=0.121.0",
@@ -12,4 +12,5 @@ dependencies = [
     "pydantic>=2.12.3",
     "sqlalchemy>=2.0.44",
     "uvicorn>=0.38.0",
+    "gunicorn>=21.2.0",
 ]
