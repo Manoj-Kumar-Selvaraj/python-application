@@ -4,9 +4,9 @@
 
 ## 1. Overview
 
-This document outlines how the assignment requirements were implemented, including architectural decisions and operational considerations.
+This document outlines how the assignment requirements were implemented, along with the architectural decisions and operational considerations taken during development.
 
-The implementation was performed in structured stages:
+The implementation was executed in structured, incremental stages:
 
 1. PostgreSQL migration
 2. Containerization (Docker + Gunicorn)
@@ -14,23 +14,23 @@ The implementation was performed in structured stages:
 4. Observability integration (pending)
 5. k3d Docker-in-Docker cluster (pending)
 
-The goal was to maintain production-grade design principles throughout the implementation without touching any logics or API endpoints.
+The goal was to preserve all existing application logic and API contracts while evolving the system into a production-ready, containerized, Kubernetes-deployable service.
 
 ---
 
 ## 2. Requirement Mapping
 
-| Requirement                                                | Implementation                                                                                                                                                                  |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Replace SQLite with PostgreSQL                             | Migrated to PostgreSQL using `asyncpg` driver and SQLAlchemy async engine. `DATABASE_URL` configurable via environment variables. Verified locally and inside Docker container. |
-| Dockerize FastAPI                                          | Production-ready Dockerfile created using Python 3.10-slim. Runs as non-root user. Gunicorn with Uvicorn worker (1 worker per pod).                                             |
-| Deploy via Helm (FastAPI, PostgreSQL, Prometheus, Grafana) | In progress. Helm chart skeleton to be implemented next.                                                                                                                        |
-| Prometheus scrapes `/metrics`                              | `/metrics` endpoint implemented using `prometheus_client`. Custom counters verified locally and inside container. Helm-level scraping configuration pending.                    |
-| Grafana dashboard at `/d/creation-dashboard-678/creation`  | Pending. Dashboard JSON and UID configuration to be implemented in observability stage.                                                                                         |
-| Ingress routing                                            | Pending. To be implemented in Helm using path-based routing.                                                                                                                    |
-| Resource constraints (2 CPU / 4GB RAM / 5GB disk)          | Architecture chosen: 1 worker per pod, horizontal scaling via replicas. Resource limits to be enforced at Helm level.                                                           |
-| Docker-in-Docker using k3d                                 | Pending. Final stage will include cluster bootstrap Dockerfile.                                                                                                                 |
-| Image configurable via Helm values                         | Docker image built as `wiki-service`. Helm values will expose configurable repository and tag.                                                                                  |
+| Requirement                                                | Implementation                                                                                                                                                                                                                                                                                         |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Replace SQLite with PostgreSQL                             | Migrated to PostgreSQL using `asyncpg` and SQLAlchemy async engine. `DATABASE_URL` is fully environment-driven. Verified locally and inside Docker container.                                                                                                                                          |
+| Dockerize FastAPI                                          | Production-ready Dockerfile created using **Python 3.10-slim**. Python 3.10 was intentionally selected for ecosystem stability and predictable container behavior rather than using a bleeding-edge runtime. Container runs as a non-root user and uses Gunicorn with a single Uvicorn worker per pod. |
+| Deploy via Helm (FastAPI, PostgreSQL, Prometheus, Grafana) | In progress. Helm chart skeleton to be implemented next.                                                                                                                                                                                                                                               |
+| Prometheus scrapes `/metrics`                              | `/metrics` endpoint implemented using `prometheus_client`. Custom counters verified locally and inside container. Helm-level scraping configuration pending.                                                                                                                                           |
+| Grafana dashboard at `/d/creation-dashboard-678/creation`  | Pending. Dashboard JSON and UID configuration to be implemented during observability stage.                                                                                                                                                                                                            |
+| Ingress routing                                            | Pending. Will be implemented using path-based routing in Helm.                                                                                                                                                                                                                                         |
+| Resource constraints (2 CPU / 4GB RAM / 5GB disk)          | Architecture intentionally designed with 1 worker per pod and horizontal scaling via replicas. Resource limits will be enforced at Helm level.                                                                                                                                                         |
+| Docker-in-Docker using k3d                                 | Pending. Final stage will include root-level cluster bootstrap Dockerfile.                                                                                                                                                                                                                             |
+| Image configurable via Helm values                         | Docker image built as `wiki-service`. Helm values will expose configurable image repository and tag.                                                                                                                                                                                                   |
 
 ---
 
@@ -38,24 +38,23 @@ The goal was to maintain production-grade design principles throughout the imple
 
 ### Execution Model
 
-* Gunicorn managing Uvicorn worker
+* Gunicorn managing a Uvicorn worker
 * 1 worker per pod
 * Horizontal scaling preferred over vertical scaling
 * Async FastAPI for I/O-bound workload
-* Kubernetes handles scaling via replicas
+* Kubernetes responsible for replica-level scaling
 
-This approach aligns with cloud-native principles and respects the 2 CPU cluster constraint.
+Given the 2 CPU cluster constraint, this model avoids excessive worker processes inside a single pod and aligns better with Kubernetes-native scaling patterns.
 
 ---
 
 ### Health Probe Strategy
 
-* **Startup probe**: Ensures database schema is initialized successfully.
+* **Startup probe**: Ensures database schema initialization completes successfully.
 * **Readiness probe**: Validates PostgreSQL connectivity.
-* **Liveness probe**: Process-level health only.
-* Database checks intentionally excluded from liveness to avoid restart loops during DB outages.
+* **Liveness probe**: Restricted to process-level health only.
 
-This design ensures graceful isolation instead of unnecessary restarts.
+Database checks were intentionally excluded from liveness to prevent crash loops during temporary database outages. This ensures graceful isolation rather than aggressive restarts.
 
 ---
 
@@ -63,9 +62,11 @@ This design ensures graceful isolation instead of unnecessary restarts.
 
 * Async SQLAlchemy engine
 * Lazy connection handling
-* Environment-driven configuration (`DATABASE_URL`)
+* Environment-driven configuration via `DATABASE_URL`
 * Fail-fast behavior during startup if DB is unreachable
-* Clean session lifecycle using dependency injection
+* Clean session lifecycle using FastAPI dependency injection
+
+The database layer remains fully asynchronous and production-aligned.
 
 ---
 
@@ -76,8 +77,10 @@ This design ensures graceful isolation instead of unnecessary restarts.
   * `users_created_total`
   * `posts_created_total`
 * `/metrics` endpoint exposed via FastAPI
-* Default Python process metrics included automatically
-* Metrics verified locally and in containerized environment
+* Default Python process metrics automatically included
+* Metrics validated locally and inside container
+
+This ensures immediate compatibility with Prometheus scraping.
 
 ---
 
@@ -93,10 +96,10 @@ Chosen design:
 
 * 1 worker per pod
 * 2 replicas (horizontal scaling)
-* Avoided over-provisioned multi-worker model
+* Avoided multi-worker vertical scaling inside a single pod
 * Relied on Kubernetes CPU throttling and scheduling
 
-This keeps resource usage predictable and controlled.
+This keeps resource consumption predictable and within the defined constraints while preserving availability.
 
 ---
 
@@ -104,22 +107,22 @@ This keeps resource usage predictable and controlled.
 
 * Networking differences between host and container during PostgreSQL connectivity
 * Container-to-host communication issues (`host.docker.internal` vs host networking)
-* Ensuring PostgreSQL container was running during Docker testing
-* Gunicorn control socket permission warning when running as non-root user
+* Ensuring PostgreSQL container state during Docker testing
+* Gunicorn control socket permission warning under non-root execution
 * Aligning Python runtime versions between local and container environments
+
+Each issue was resolved without modifying core application logic.
 
 ---
 
 ## 5. Potential Production Improvements
 
-* Implement connection retry logic for transient DB failures
+* Add connection retry logic for transient DB failures
 * Deploy PostgreSQL as StatefulSet with persistent volumes
-* Add structured logging
-* Introduce circuit breaker pattern for DB dependency
-* Implement Horizontal Pod Autoscaler
-* Use multi-stage Docker build for smaller final image
-* Add centralized log aggregation (e.g., Loki/ELK)
+* Introduce structured logging
+* Implement circuit breaker pattern for database dependency
+* Add Horizontal Pod Autoscaler
+* Use multi-stage Docker build to further reduce image size
+* Integrate centralized logging (e.g., Loki or ELK stack)
 
 ---
-
-If you'd like, next we can tighten this further to make it sound even more senior-level and concise for reviewer impact.
