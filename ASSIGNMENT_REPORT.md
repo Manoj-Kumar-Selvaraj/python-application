@@ -28,9 +28,9 @@ The goal was to preserve all existing application logic and API contracts while 
 | Prometheus scrapes `/metrics`                              | `/metrics` endpoint implemented using `prometheus_client`. Custom counters verified locally and inside container. Helm-level scraping configuration pending.                                                                                                                                           |
 | Grafana dashboard at `/d/creation-dashboard-678/creation`  | Pending. Dashboard JSON and UID configuration to be implemented during observability stage.                                                                                                                                                                                                            |
 | Ingress routing                                            | Pending. Will be implemented using path-based routing in Helm.                                                                                                                                                                                                                                         |
-| Resource constraints (2 CPU / 4GB RAM / 5GB disk)          | Architecture intentionally designed with 1 worker per pod and horizontal scaling via replicas. Resource limits will be enforced at Helm level.                                                                                                                                                         |
+| Resource constraints (2 CPU / 4GB RAM / 5GB disk)          | Architecture intentionally designed with 1 worker per pod and horizontal scaling via replicas. Resource limits enforced at Helm level.                                                                                                                                                                 |
 | Docker-in-Docker using k3d                                 | Pending. Final stage will include root-level cluster bootstrap Dockerfile.                                                                                                                                                                                                                             |
-| Image configurable via Helm values                         | Docker image built as `wiki-service`. Helm values will expose configurable image repository and tag.                                                                                                                                                                                                   |
+| Image configurable via Helm values                         | Docker image built as `wiki-service`. Helm values expose configurable image repository and tag.                                                                                                                                                                                                        |
 
 ---
 
@@ -45,6 +45,8 @@ The goal was to preserve all existing application logic and API contracts while 
 * Kubernetes responsible for replica-level scaling
 
 Given the 2 CPU cluster constraint, this model avoids excessive worker processes inside a single pod and aligns better with Kubernetes-native scaling patterns.
+
+The async execution model allows a single pod to handle multiple concurrent I/O-bound requests efficiently, reducing the need for aggressive horizontal scaling.
 
 ---
 
@@ -99,7 +101,21 @@ Chosen design:
 * Avoided multi-worker vertical scaling inside a single pod
 * Relied on Kubernetes CPU throttling and scheduling
 
-This keeps resource consumption predictable and within the defined constraints while preserving availability.
+This keeps resource consumption predictable and within defined constraints while preserving availability during rolling updates or pod-level failures.
+
+---
+
+### Autoscaling Consideration (HPA Decision)
+
+Horizontal Pod Autoscaler (HPA) was intentionally not implemented in the current setup.
+
+This deployment targets a single-node k3d cluster with a fixed compute ceiling (2 CPU, 4GB RAM) and no cluster autoscaler. While HPA can dynamically increase pod replicas based on CPU or memory utilization, it does not increase total available compute capacity in this environment.
+
+Additional replicas would compete for the same CPU resources, potentially introducing throttling and scheduling contention without improving overall throughput.
+
+Given the async FastAPI stack (async SQLAlchemy + asyncpg), each pod is capable of handling multiple concurrent I/O-bound requests efficiently. Therefore, a static replica count provides availability while maintaining deterministic resource behavior.
+
+In a multi-node production cluster with node autoscaling enabled (e.g., EKS + Cluster Autoscaler or VM-backed on-prem clusters), HPA would be introduced to enable true horizontal elasticity.
 
 ---
 
@@ -121,7 +137,7 @@ Each issue was resolved without modifying core application logic.
 * Deploy PostgreSQL as StatefulSet with persistent volumes
 * Introduce structured logging
 * Implement circuit breaker pattern for database dependency
-* Add Horizontal Pod Autoscaler
+* Introduce Horizontal Pod Autoscaler in multi-node environments with cluster autoscaling support
 * Use multi-stage Docker build to further reduce image size
 * Integrate centralized logging (e.g., Loki or ELK stack)
 
