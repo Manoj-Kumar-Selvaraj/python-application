@@ -1,144 +1,288 @@
 # Nebula Aurora Assignment Report
 
----
+This document describes how the assignment was implemented, the reasoning behind key design decisions, and how the system can be validated.
 
-## 1. Overview
-
-This document outlines how the assignment requirements were implemented, along with the architectural decisions and operational considerations taken during development.
-
-The implementation was executed in structured, incremental stages:
-
-1. PostgreSQL migration
-2. Containerization (Docker + Gunicorn)
-3. Helm-based Kubernetes deployment (in progress)
-4. Observability integration (pending)
-5. k3d Docker-in-Docker cluster (pending)
-
-The goal was to preserve all existing application logic and API contracts while evolving the system into a production-ready, containerized, Kubernetes-deployable service.
+The goal was not only to meet the functional requirements, but to ensure the system behaves predictably under Kubernetes constraints and startup race conditions.
 
 ---
 
-## 2. Requirement Mapping
+## 1. Repository Structure
 
-| Requirement                                                | Implementation                                                                                                                                                                                                                                                                                         |
-| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Replace SQLite with PostgreSQL                             | Migrated to PostgreSQL using `asyncpg` and SQLAlchemy async engine. `DATABASE_URL` is fully environment-driven. Verified locally and inside Docker container.                                                                                                                                          |
-| Dockerize FastAPI                                          | Production-ready Dockerfile created using **Python 3.10-slim**. Python 3.10 was intentionally selected for ecosystem stability and predictable container behavior rather than using a bleeding-edge runtime. Container runs as a non-root user and uses Gunicorn with a single Uvicorn worker per pod. |
-| Deploy via Helm (FastAPI, PostgreSQL, Prometheus, Grafana) | In progress. Helm chart skeleton to be implemented next.                                                                                                                                                                                                                                               |
-| Prometheus scrapes `/metrics`                              | `/metrics` endpoint implemented using `prometheus_client`. Custom counters verified locally and inside container. Helm-level scraping configuration pending.                                                                                                                                           |
-| Grafana dashboard at `/d/creation-dashboard-678/creation`  | Pending. Dashboard JSON and UID configuration to be implemented during observability stage.                                                                                                                                                                                                            |
-| Ingress routing                                            | Pending. Will be implemented using path-based routing in Helm.                                                                                                                                                                                                                                         |
-| Resource constraints (2 CPU / 4GB RAM / 5GB disk)          | Architecture intentionally designed with 1 worker per pod and horizontal scaling via replicas. Resource limits enforced at Helm level.                                                                                                                                                                 |
-| Docker-in-Docker using k3d                                 | Pending. Final stage will include root-level cluster bootstrap Dockerfile.                                                                                                                                                                                                                             |
-| Image configurable via Helm values                         | Docker image built as `wiki-service`. Helm values expose configurable image repository and tag.                                                                                                                                                                                                        |
+The repository is organized to clearly separate responsibilities:
+
+```
+/
+├── wiki-service/     # FastAPI application + Docker image
+├── wiki-chart/       # Helm chart (API, PostgreSQL, Prometheus, Grafana)
+├── Dockerfile        # Docker-in-Docker runner (Part 2)
+└── entrypoint.sh     # Bootstraps k3d + Helm installation
+```
+
+This separation allows:
+
+* Independent image building and versioning
+* Clean Helm templating
+* Reproducible “cluster-in-a-container” execution for Part 2
 
 ---
 
-## 3. Architecture Decisions
+## 2. Architectural Overview
 
-### Execution Model
+The system consists of:
 
-* Gunicorn managing a Uvicorn worker
+* FastAPI (async)
+* PostgreSQL (StatefulSet + PVC)
+* Prometheus (scraping `/metrics`)
+* Grafana (dashboard provisioning)
+* Ingress (path-based routing)
+* k3d cluster (resource constrained)
+* Docker-in-Docker wrapper for reproducibility
+
+Each component was chosen and configured with operational behavior in mind.
+
+---
+
+## 3. Application Layer Decisions
+
+### Async FastAPI + async SQLAlchemy
+
+The API uses async FastAPI with SQLAlchemy’s async engine and `asyncpg`.
+
+**Why async?**
+
+* The workload is I/O-bound (database calls).
+* Async allows a single worker to handle concurrent requests efficiently.
+* Under a constrained 2 CPU environment, async is more resource-efficient than increasing worker count.
+
+---
+
+### Gunicorn + Single Uvicorn Worker Per Pod
+
+The container runs:
+
+* Gunicorn
+* `uvicorn.workers.UvicornWorker`
 * 1 worker per pod
-* Horizontal scaling preferred over vertical scaling
-* Async FastAPI for I/O-bound workload
-* Kubernetes responsible for replica-level scaling
 
-Given the 2 CPU cluster constraint, this model avoids excessive worker processes inside a single pod and aligns better with Kubernetes-native scaling patterns.
+**Why 1 worker per pod?**
 
-The async execution model allows a single pod to handle multiple concurrent I/O-bound requests efficiently, reducing the need for aggressive horizontal scaling.
+Instead of vertical scaling (multiple workers inside a pod), the design prefers horizontal scaling (multiple replicas). This aligns with Kubernetes-native scaling patterns and avoids CPU oversubscription within a constrained node.
 
----
+Replica count is set to 2 to:
 
-### Health Probe Strategy
-
-* **Startup probe**: Ensures database schema initialization completes successfully.
-* **Readiness probe**: Validates PostgreSQL connectivity.
-* **Liveness probe**: Restricted to process-level health only.
-
-Database checks were intentionally excluded from liveness to prevent crash loops during temporary database outages. This ensures graceful isolation rather than aggressive restarts.
+* Support rolling updates
+* Avoid single-point failure
+* Stay within the 2 CPU cluster budget
 
 ---
 
-### Database Lifecycle
+## 4. Database Deployment
 
-* Async SQLAlchemy engine
-* Lazy connection handling
-* Environment-driven configuration via `DATABASE_URL`
-* Fail-fast behavior during startup if DB is unreachable
-* Clean session lifecycle using FastAPI dependency injection
+PostgreSQL is deployed as a StatefulSet with a PersistentVolumeClaim.
 
-The database layer remains fully asynchronous and production-aligned.
+**Why StatefulSet?**
 
----
+* Databases are stateful workloads.
+* Stable network identity and storage binding are required.
+* PVC ensures data survives pod restarts.
 
-### Metrics Strategy
-
-* Prometheus `Counter` metrics implemented:
-
-  * `users_created_total`
-  * `posts_created_total`
-* `/metrics` endpoint exposed via FastAPI
-* Default Python process metrics automatically included
-* Metrics validated locally and inside container
-
-This ensures immediate compatibility with Prometheus scraping.
+Storage is explicitly defined (1Gi) to respect the overall 5GB disk constraint.
 
 ---
 
-### Resource Tuning Decisions
+## 5. Health Probe Strategy
 
-Cluster constraints:
+Three probes are implemented:
+
+### `/health/live`
+
+* Process-level only.
+* Does not check the database.
+* Prevents crash loops if DB is temporarily unavailable.
+
+### `/health/ready`
+
+* Verifies database connectivity.
+* If DB becomes unavailable, the pod is removed from Service.
+* Does not restart the container.
+
+### `/health/startup`
+
+* Indicates application boot readiness.
+* Used to gate readiness and liveness during initialization.
+
+**Justification**
+
+Separating liveness and readiness avoids unnecessary restarts during DB outages.
+This mirrors real production probe design rather than simplistic health checks.
+
+---
+
+## 6. Startup Race Condition Handling
+
+During testing, a startup race condition was observed:
+
+* Kubernetes starts API and PostgreSQL simultaneously.
+* API attempted DB connection before PostgreSQL was ready.
+* Result: CrashLoopBackOff.
+
+This was resolved by adding retry logic in the FastAPI startup hook.
+
+**Why implement retry in application code?**
+
+Kubernetes does not guarantee workload startup ordering. Relying on Helm ordering alone is not sufficient. Services should tolerate transient dependency unavailability.
+
+This makes the system resilient and production-aligned.
+
+---
+
+## 7. Observability
+
+The API exposes:
+
+* `users_created_total`
+* `posts_created_total`
+
+Prometheus scrapes `/metrics`.
+
+Grafana dashboard is provisioned and accessible via:
+
+```
+/grafana/d/creation-dashboard-678/creation
+```
+
+Grafana login:
+
+* Username: `admin`
+* Password: `admin`
+
+**Why include application-level counters?**
+
+Infrastructure health alone is insufficient. Application metrics validate real functionality (user creation, post creation), not just container uptime.
+
+---
+
+## 8. Resource Constraints
+
+Cluster budget:
 
 * 2 CPU
 * 4GB RAM
 * 5GB disk
 
-Chosen design:
+Design choices made with this in mind:
 
 * 1 worker per pod
-* 2 replicas (horizontal scaling)
-* Avoided multi-worker vertical scaling inside a single pod
-* Relied on Kubernetes CPU throttling and scheduling
+* 2 replicas only
+* Explicit resource requests/limits on all workloads
+* Lightweight Python base image
+* Minimal Prometheus/Grafana configuration
 
-This keeps resource consumption predictable and within defined constraints while preserving availability during rolling updates or pod-level failures.
-
----
-
-### Autoscaling Consideration (HPA Decision)
-
-Horizontal Pod Autoscaler (HPA) was intentionally not implemented in the current setup.
-
-This deployment targets a single-node k3d cluster with a fixed compute ceiling (2 CPU, 4GB RAM) and no cluster autoscaler. While HPA can dynamically increase pod replicas based on CPU or memory utilization, it does not increase total available compute capacity in this environment.
-
-Additional replicas would compete for the same CPU resources, potentially introducing throttling and scheduling contention without improving overall throughput.
-
-Given the async FastAPI stack (async SQLAlchemy + asyncpg), each pod is capable of handling multiple concurrent I/O-bound requests efficiently. Therefore, a static replica count provides availability while maintaining deterministic resource behavior.
-
-In a multi-node production cluster with node autoscaling enabled (e.g., EKS + Cluster Autoscaler or VM-backed on-prem clusters), HPA would be introduced to enable true horizontal elasticity.
+The system remains stable within the constrained environment.
 
 ---
 
-## 4. Challenges Faced
+## 9. Helm Design
 
-* Networking differences between host and container during PostgreSQL connectivity
-* Container-to-host communication issues (`host.docker.internal` vs host networking)
-* Ensuring PostgreSQL container state during Docker testing
-* Gunicorn control socket permission warning under non-root execution
-* Aligning Python runtime versions between local and container environments
+Key principles:
 
-Each issue was resolved without modifying core application logic.
+* All configurable values exposed via `values.yaml`
+* Image name configurable (set `fastapi.image_name` in `wiki-chart/values.yaml`)
+* Resource limits configurable
+* Credentials defined centrally
+* Minimal templating complexity
+
+This keeps the chart readable and review-friendly.
 
 ---
 
-## 5. Potential Production Improvements
+## 10. Docker-in-Docker (Part 2)
 
-* Add connection retry logic for transient DB failures
-* Deploy PostgreSQL as StatefulSet with persistent volumes
-* Introduce structured logging
-* Implement circuit breaker pattern for database dependency
-* Introduce Horizontal Pod Autoscaler in multi-node environments with cluster autoscaling support
-* Use multi-stage Docker build to further reduce image size
-* Integrate centralized logging (e.g., Loki or ELK stack)
+The root Dockerfile:
+
+* Starts `dockerd`
+* Creates a k3d cluster inside the container
+* Installs ingress-nginx
+* Installs the Helm chart
+* Waits for workloads
+
+No host Docker socket is mounted.
+
+The container is run with:
+
+```
+--privileged --cgroupns=host -p 8080:8080
+```
+
+This ensures k3s can detect cgroup controllers on modern hosts.
+
+Note: some environments may work without `--cgroupns=host` (for example, if the host is using cgroup v1 or if cgroup v2 controllers are delegated differently). For reproducibility across modern Linux hosts, `--cgroupns=host` is included in the documented run command.
+
+**Why DinD instead of docker.sock?**
+
+Mounting the host socket would break isolation and violate the requirement. Running Docker inside the container ensures full self-containment.
+
+---
+
+## 11. Verification
+
+After startup (~2–3 minutes):
+
+API:
+
+```
+http://localhost:8080/users
+http://localhost:8080/posts
+```
+
+Metrics:
+
+```
+http://localhost:8080/metrics
+```
+
+Grafana:
+
+```
+http://localhost:8080/grafana/
+```
+
+Required dashboard path:
+
+```
+http://localhost:8080/grafana/d/creation-dashboard-678/creation
+```
+
+Functional validation examples:
+
+* Create users/posts via `/users` and `/posts`
+* Confirm counters increase in `/metrics`
+* Confirm Grafana dashboard loads at `/grafana/d/creation-dashboard-678/creation`
+
+Scripted smoke checks:
+
+* `wiki-service/test_api.sh` exercises the ingress-routed endpoints (`/users/*`, `/posts/*`, `/metrics`, `/grafana`) and exits non-zero on any unexpected HTTP status.
+* `entrypoint.sh` runs this script after the Helm install/upgrade; if it fails, the container exits with a non-zero status (so CI/autograding can detect failures).
+
+Optional resilience checks (if you want to demonstrate self-healing):
+
+* Delete an API pod and observe it get recreated
+* Restart PostgreSQL and observe the API recover
+
+---
+
+## 12. Summary
+
+This implementation focuses on:
+
+* Async I/O efficiency
+* Proper probe separation
+* Stateful workload handling
+* Resilience against startup races
+* Observability integration
+* Resource constraint awareness
+* Reproducible DinD execution
+
+The system is fully containerized, Helm-packaged, observable, and operationally resilient.
 
 ---

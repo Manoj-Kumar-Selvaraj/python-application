@@ -25,8 +25,8 @@ RUN pip install --upgrade pip \
 COPY app ./app
 
 # Create non-root user
-RUN useradd -m appuser
-USER appuser
+RUN useradd -m -u 1000 appuser
+USER 1000
 
 # Expose application port
 EXPOSE 8000

@@ -1,0 +1,65 @@
+replicaCount: 2
+
+# -----------------------------
+# FastAPI
+# -----------------------------
+fastapi:
+  image_name: manojss1998/wiki-service:1.5.0
+  pullPolicy: IfNotPresent
+
+# -----------------------------
+# PostgreSQL
+# -----------------------------
+postgres:
+  image: postgres:15
+
+  db: wiki
+  user: wiki
+  password: wiki
+
+  storage: 1Gi
+
+# -----------------------------
+# Grafana
+# -----------------------------
+grafana:
+  adminUser: admin
+  adminPassword: admin
+
+# -----------------------------
+# Resource Configuration
+# Entire cluster must stay < 2 CPU / 4GB RAM
+# -----------------------------
+resources:
+
+  api:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  postgres:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  prometheus:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi
+
+  grafana:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 300m
+      memory: 256Mi

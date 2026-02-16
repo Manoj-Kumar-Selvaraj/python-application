@@ -1,0 +1,9 @@
+settings:
+  workerConnections: 1024
+  defaultProxyTimeout: 600
+
+ports:
+  "6443.tcp":
+    - "k3d-wiki-cluster-server-0"
+  "30080.tcp":
+    - "k3d-wiki-cluster-server-0"

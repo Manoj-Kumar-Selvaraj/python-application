@@ -1,0 +1,25 @@
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: wiki-cluster
+
+servers: 1
+agents: 0
+
+ports:
+  - port: 8080:30080
+    nodeFilters:
+      - loadbalancer
+
+options:
+  k3s:
+    extraArgs:
+      - arg: "--disable=traefik"
+        nodeFilters:
+          - server:0
+
+  runtime:
+    limits:
+      cpu: "2"
+      memory: "4g"
+      disk: "5g"

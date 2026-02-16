@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-grafana-dashboard
+data:
+  creation-dashboard.json: |
+    {
+      "uid": "creation-dashboard-678",
+      "title": "Creation Dashboard",
+      "timezone": "browser",
+      "schemaVersion": 16,
+      "version": 0,
+      "refresh": "5s",
+      "panels": [
+        {
+          "id": 1,
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 12,
+            "h": 8
+          },
+          "type": "timeseries",
+          "title": "Creation Rate",
+          "targets": [
+            {
+              "expr": "rate(users_created_total[1m])",
+              "refId": "A",
+              "legendFormat": "Users"
+            },
+            {
+              "expr": "rate(posts_created_total[1m])",
+              "refId": "B",
+              "legendFormat": "Posts"
+            }
+          ],
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ]
+    }

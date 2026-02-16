@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-api
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          image: {{ .Values.fastapi.image_name }}
+          imagePullPolicy: {{ .Values.fastapi.pullPolicy }}
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: postgresql+asyncpg://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@{{ .Release.Name }}-postgres:5432/{{ .Values.postgres.db }}
+          resources:
+{{ toYaml .Values.resources.api | indent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
+          startupProbe:
+            httpGet:
+              path: /health/startup
+              port: 8000
+            failureThreshold: 12
+            periodSeconds: 5

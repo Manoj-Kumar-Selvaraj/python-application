@@ -1,41 +1,100 @@
+import asyncio
+
 from fastapi import FastAPI, Depends, HTTPException, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+
 from app.database import engine, get_db, Base
 from app.models import User, Post
 from app.schemas import UserCreate, UserResponse, PostCreate, PostResponse
 from app.metrics import users_created_total, posts_created_total
 
+
 app = FastAPI(title="User and Post API")
 
 
-# Create database tables on startup
+# -----------------------------
+# Database Health Check Helper
+# -----------------------------
+async def check_database():
+    """
+    Lightweight DB connectivity check.
+    Ensures connection is opened and closed properly.
+    """
+    async with engine.begin() as conn:
+        await conn.execute(text("SELECT 1"))
+
+
+# -----------------------------
+# Startup Logic (with retry)
+# -----------------------------
 @app.on_event("startup")
 async def startup():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    """
+    Ensures DB is reachable before app fully boots.
+    Retries to handle Kubernetes startup race conditions.
+    """
+    max_retries = 10
+    delay_seconds = 3
+
+    for attempt in range(max_retries):
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            return
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise e
+            await asyncio.sleep(delay_seconds)
 
 
+# -----------------------------
+# Health Endpoints
+# -----------------------------
+@app.get("/health/live")
+async def live():
+    """
+    Liveness probe.
+    Only verifies process responsiveness.
+    No DB checks to avoid restart loops.
+    """
+    return {"status": "alive"}
+
+
+@app.get("/health/ready")
+async def ready():
+    """
+    Readiness probe.
+    Continuously verifies DB connectivity.
+    If DB fails, pod is removed from Service.
+    """
+    try:
+        await check_database()
+        return {"status": "ready"}
+    except Exception:
+        raise HTTPException(status_code=503, detail="Database not ready")
+
+
+@app.get("/health/startup")
+async def startup_health():
+    """
+    Startup probe.
+    Indicates application is reachable after boot.
+    """
+    return {"status": "started"}
+
+
+# -----------------------------
+# Business Endpoints
+# -----------------------------
 @app.post("/users", response_model=UserResponse)
 async def create_user(user: UserCreate, db: AsyncSession = Depends(get_db)):
-    """
-    Create a new user.
-
-    Request body:
-    - name: Name of the user
-
-    Response:
-    - id: ID of the created user
-    - name: Name of the user
-    - created_time: Time the user was created
-    """
     new_user = User(name=user.name)
     db.add(new_user)
     await db.commit()
     await db.refresh(new_user)
 
-    # Increment Prometheus counter
     users_created_total.inc()
 
     return UserResponse(
@@ -47,20 +106,6 @@ async def create_user(user: UserCreate, db: AsyncSession = Depends(get_db)):
 
 @app.post("/posts", response_model=PostResponse)
 async def create_post(post: PostCreate, db: AsyncSession = Depends(get_db)):
-    """
-    Create a new post under a given user.
-
-    Request body:
-    - user_id: ID of the user creating the post
-    - content: Content of the post
-
-    Response:
-    - post_id: ID of the created post
-    - content: Content of the post
-    - user_id: ID of the user who created the post
-    - created_time: Time the post was created
-    """
-    # Check if user exists
     result = await db.execute(select(User).where(User.id == post.user_id))
     user = result.scalar_one_or_none()
 
@@ -72,7 +117,6 @@ async def create_post(post: PostCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(new_post)
 
-    # Increment Prometheus counter
     posts_created_total.inc()
 
     return PostResponse(
@@ -86,14 +130,6 @@ async def create_post(post: PostCreate, db: AsyncSession = Depends(get_db)):
 @app.get("/users/{id}", response_model=UserResponse)
 @app.get("/user/{id}", response_model=UserResponse, include_in_schema=False)
 async def get_user(id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Fetch a user by ID.
-
-    Response:
-    - id: ID of the user
-    - name: Name of the user
-    - created_time: Time the user was created
-    """
     result = await db.execute(select(User).where(User.id == id))
     user = result.scalar_one_or_none()
 
@@ -109,15 +145,6 @@ async def get_user(id: int, db: AsyncSession = Depends(get_db)):
 
 @app.get("/posts/{id}", response_model=PostResponse)
 async def get_post(id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Fetch a post by ID.
-
-    Response:
-    - post_id: ID of the post
-    - content: Content of the post
-    - user_id: ID of the user who created the post
-    - created_time: Time the post was created
-    """
     result = await db.execute(select(Post).where(Post.id == id))
     post = result.scalar_one_or_none()
 
@@ -134,7 +161,6 @@ async def get_post(id: int, db: AsyncSession = Depends(get_db)):
 
 @app.get("/")
 async def root():
-    """Root endpoint with API information."""
     return {
         "message": "User and Post API",
         "endpoints": {
@@ -149,11 +175,7 @@ async def root():
 
 @app.get("/metrics")
 async def metrics():
-    """
-    Prometheus metrics endpoint.
-
-    Exposes Prometheus metrics including:
-    - users_created_total: Total number of users created
-    - posts_created_total: Total number of posts created
-    """
-    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST
+    )
